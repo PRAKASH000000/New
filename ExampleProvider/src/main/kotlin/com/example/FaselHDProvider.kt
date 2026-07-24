@@ -40,3 +40,4 @@ class FaselHDProvider : MainAPI() {
         return true
     }
 }
+
