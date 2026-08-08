@@ -1,0 +1,8 @@
+{
+  "name": "CinemaOS Repo",
+  "description": "My custom Cloudstream extension",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/PRAKASH000000/New/builds/plugins.json"
+  ]
+}
