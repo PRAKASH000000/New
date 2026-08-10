@@ -1,7 +1,7 @@
 package com.cinemaos.tv
 
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.* // Added this wildcard import to fix all missing references
+import com.lagradost.cloudstream3.utils.* 
 
 class CinemaOSProvider : MainAPI() {
     override var mainUrl = "https://cinemaos.live"
@@ -77,16 +77,17 @@ class CinemaOSProvider : MainAPI() {
         
         val rawVideo = document.selectFirst("video source, video")?.attr("src")
         if (rawVideo != null) {
-            // Updated to newExtractorLink() to fix the Cloudstream deprecation error
+            // Re-formatted to the new Cloudstream DSL Builder syntax
             callback.invoke(
                 newExtractorLink(
                     source = "CinemaOS",
                     name = "CinemaOS",
-                    url = rawVideo,
-                    referer = playerUrl,
-                    quality = Qualities.P1080.value,
-                    isM3u8 = rawVideo.contains(".m3u8")
-                )
+                    url = rawVideo
+                ) {
+                    this.referer = playerUrl
+                    this.quality = Qualities.P1080.value
+                    this.isM3u8 = rawVideo.contains(".m3u8")
+                }
             )
         }
         
