@@ -2,7 +2,6 @@ package com.cinemaos.tv
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.network.WebViewResolver // The new interceptor tool
 
 class CinemaOSProvider : MainAPI() {
     override var mainUrl = "https://cinemaos.live"
@@ -11,7 +10,7 @@ class CinemaOSProvider : MainAPI() {
 
     private val defaultHeaders = mapOf(
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*|q=0.8"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
@@ -51,7 +50,7 @@ class CinemaOSProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         val document = app.get(url, headers = defaultHeaders).document
 
-        val rawTitle = document.selectFirst("meta[property=og:title]")?.attr("content")?.replace("Watch ", "") ?: ""
+        val rawTitle = document.search("meta[property=og:title]").attr("content").replace("Watch ", "")
         val title = rawTitle.substringBeforeLast(" (").trim()
         val year = rawTitle.substringAfterLast("(").replace(")", "").toIntOrNull()
         
@@ -72,55 +71,55 @@ class CinemaOSProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val tmdbId = data.substringAfterLast("/")
-        val playerUrl = "https://cinemaos.tech/player/$tmdbId?theme=ffffff"
         
-        // 1. Create the Interceptor net to catch video files or known embed links in the background
-        val interceptor = WebViewResolver(
-            Regex("""(?i)\.(mp4|m3u8)|vidsrc|autoembed|embedsu""")
-        )
+        // 1. Fetch the movie title dynamically from the load page to match your API requirements
+        val doc = app.get(data, headers = defaultHeaders).document
+        val rawTitle = doc.selectFirst("meta[property=og:title]")?.attr("content")?.replace("Watch ", "") ?: "Movie"
+        val cleanTitle = rawTitle.substringBeforeLast(" (").trim().replace(" ", "+")
 
+        // 2. Call your direct CinemaOS V2 backend API endpoint
+        val apiUrl = "https://cinemaos.live/api/cinemaosv2?tmdbId=$tmdbId&type=movie&title=$cleanTitle"
+        
         try {
-            // 2. Open the hidden browser and let JavaScript run until it hits our net
-            val response = app.get(playerUrl, interceptor = interceptor)
-            val caughtUrl = response.url
+            val apiResponse = app.get(
+                apiUrl, 
+                headers = mapOf(
+                    "User-Agent" to "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6 Mobile/15E148 Safari/604.1",
+                    "Referer" to data
+                )
+            ).text
 
-            // 3. If it caught a raw video file from your private servers:
-            if (caughtUrl.contains(".m3u8") || caughtUrl.contains(".mp4")) {
-                val linkType = if (caughtUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+            // 3. Extract the stream URL from the JSON response
+            // (If the response returns the raw stream URL or JSON string, we parse it)
+            if (apiResponse.isNotBlank()) {
+                // If the response itself is the direct link or contains a stream URL:
+                val streamUrl = if (apiResponse.startsWith("http")) apiResponse else {
+                    // Quick check if it's a JSON string containing the link
+                    // e.g. finding url field or fallback to text
+                    apiResponse.substringAfter("\"url\":\"").substringBefore("\"")
+                }.ifBlank { apiResponse }
+
+                val finalUrl = if (streamUrl.startsWith("http")) streamUrl else apiResponse
+
+                val isM3u8 = finalUrl.contains(".m3u8") || finalUrl.contains("m3s")
+                val linkType = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+
                 callback.invoke(
                     newExtractorLink(
                         source = "CinemaOS",
-                        name = "CinemaOS Private Server",
-                        url = caughtUrl,
+                        name = "CinemaOS V2 (Private)",
+                        url = finalUrl,
                         type = linkType
                     ) {
-                        this.referer = playerUrl
+                        this.referer = "https://cinemaos.live/"
                         this.quality = Qualities.P1080.value
                     }
                 )
-            } else {
-                // 4. If it caught an iframe instead, send it to the built-in decoders
-                loadExtractor(caughtUrl, subtitleCallback, callback)
             }
-            
-            // 5. Fallback: Parse the rendered HTML just in case the JS injected an iframe directly into the page
-            val document = response.document
-            val iframe = document.selectFirst("iframe")?.attr("src")
-            if (iframe != null) {
-                loadExtractor(fixUrl(iframe), subtitleCallback, callback)
-            }
-
         } catch (e: Exception) {
-            // Safety net just in case the WebView times out
-            val embedUrls = listOf(
-                "https://vidsrc.me/embed/movie?tmdb=$tmdbId",
-                "https://autoembed.co/movie/tmdb/$tmdbId"
-            )
-            embedUrls.forEach { embedUrl ->
-                loadExtractor(embedUrl, subtitleCallback, callback)
-            }
+            // Fallback if API needs custom error handling
         }
-        
+
         return true
     }
 }
