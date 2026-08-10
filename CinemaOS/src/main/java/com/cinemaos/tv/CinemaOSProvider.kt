@@ -1,34 +1,30 @@
 package com.cinemaos.tv
 
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.* 
+import com.lagradost.cloudstream3.utils.*
 
 class CinemaOSProvider : MainAPI() {
     override var mainUrl = "https://cinemaos.live"
     override var name = "CinemaOS"
     override val hasMainPage = true
 
+    // Reusable headers to avoid duplication
+    private val defaultHeaders = mapOf(
+        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+    )
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val document = app.get(
-            mainUrl,
-            headers = mapOf(
-                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
-            )
-        ).document
+        val document = app.get(mainUrl, headers = defaultHeaders).document
         
-        val movies = ArrayList<SearchResponse>()
+        val movies = document.select("a.group.block").mapNotNull { element ->
+            val title = element.selectFirst("img")?.attr("alt") ?: return@mapNotNull null
+            val url = fixUrlNull(element.attr("href")) ?: return@mapNotNull null
+            val posterUrl = fixUrlNull(element.selectFirst("img")?.attr("src"))
 
-        document.select("a.group.block").forEach { element ->
-            val title = element.selectFirst("img")?.attr("alt") ?: return@forEach
-            val url = element.attr("href")
-            val posterUrl = element.selectFirst("img")?.attr("src")
-
-            movies.add(
-                newMovieSearchResponse(title, url, TvType.Movie) {
-                    this.posterUrl = posterUrl
-                }
-            )
+            newMovieSearchResponse(title, url, TvType.Movie) {
+                this.posterUrl = posterUrl
+            }
         }
 
         return newHomePageResponse(
@@ -38,24 +34,31 @@ class CinemaOSProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        return emptyList()
+        // Adjust this endpoint based on CinemaOS's actual search route
+        val searchUrl = "$mainUrl/search?q=$query"
+        
+        val document = app.get(searchUrl, headers = defaultHeaders).document
+
+        return document.select("a.group.block").mapNotNull { element ->
+            val title = element.selectFirst("img")?.attr("alt") ?: return@mapNotNull null
+            val url = fixUrlNull(element.attr("href")) ?: return@mapNotNull null
+            val posterUrl = fixUrlNull(element.selectFirst("img")?.attr("src"))
+
+            newMovieSearchResponse(title, url, TvType.Movie) {
+                this.posterUrl = posterUrl
+            }
+        }
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val document = app.get(
-            url,
-            headers = mapOf(
-                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
-            )
-        ).document
+        val document = app.get(url, headers = defaultHeaders).document
 
         val rawTitle = document.selectFirst("meta[property=og:title]")?.attr("content")?.replace("Watch ", "") ?: ""
         val title = rawTitle.substringBeforeLast(" (").trim()
         val year = rawTitle.substringAfterLast("(").replace(")", "").toIntOrNull()
         
         val plot = document.selectFirst("meta[property=og:description]")?.attr("content")
-        val backgroundPoster = document.selectFirst("meta[property=og:image]")?.attr("content")
+        val backgroundPoster = fixUrlNull(document.selectFirst("meta[property=og:image]")?.attr("content"))
 
         return newMovieLoadResponse(title, url, TvType.Movie, url) {
             this.posterUrl = backgroundPoster
@@ -64,30 +67,33 @@ class CinemaOSProvider : MainAPI() {
         }
     }
 
-    override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
+    override suspend fun loadLinks(
+        data: String, 
+        isCasting: Boolean, 
+        subtitleCallback: (SubtitleFile) -> Unit, 
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
         val tmdbId = data.substringAfterLast("/")
         val playerUrl = "https://cinemaos.tech/player/$tmdbId?theme=ffffff"
         val document = app.get(playerUrl).document
         
         val iframe = document.selectFirst("iframe")?.attr("src")
         if (iframe != null) {
-            val fixedIframe = if (iframe.startsWith("//")) "https:$iframe" else iframe
-            loadExtractor(fixedIframe, subtitleCallback, callback)
+            // fixUrl automatically handles paths starting with "//"
+            loadExtractor(fixUrl(iframe), subtitleCallback, callback)
         }
         
         val rawVideo = document.selectFirst("video source, video")?.attr("src")
         if (rawVideo != null) {
-            // Re-formatted to the new Cloudstream DSL Builder syntax
             callback.invoke(
-                newExtractorLink(
+                ExtractorLink(
                     source = "CinemaOS",
                     name = "CinemaOS",
-                    url = rawVideo
-                ) {
-                    this.referer = playerUrl
-                    this.quality = Qualities.P1080.value
-                    this.isM3u8 = rawVideo.contains(".m3u8")
-                }
+                    url = rawVideo,
+                    referer = playerUrl,
+                    quality = Qualities.P1080.value,
+                    isM3u8 = rawVideo.contains(".m3u8")
+                )
             )
         }
         
