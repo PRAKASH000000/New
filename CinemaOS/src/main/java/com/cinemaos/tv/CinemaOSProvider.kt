@@ -10,7 +10,7 @@ class CinemaOSProvider : MainAPI() {
 
     private val defaultHeaders = mapOf(
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*|q=0.8"
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
@@ -50,7 +50,7 @@ class CinemaOSProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         val document = app.get(url, headers = defaultHeaders).document
 
-        val rawTitle = document.search("meta[property=og:title]").attr("content").replace("Watch ", "")
+        val rawTitle = document.selectFirst("meta[property=og:title]")?.attr("content")?.replace("Watch ", "") ?: ""
         val title = rawTitle.substringBeforeLast(" (").trim()
         val year = rawTitle.substringAfterLast("(").replace(")", "").toIntOrNull()
         
@@ -79,7 +79,6 @@ class CinemaOSProvider : MainAPI() {
         val apiUrl = "https://cinemaos.live/api/cinemaosv2?tmdbId=$tmdbId&type=movie&title=$cleanTitle"
         
         try {
-            // We fetch the JSON response from your V2 backend
             val apiResponse = app.get(
                 apiUrl, 
                 headers = mapOf(
@@ -88,13 +87,8 @@ class CinemaOSProvider : MainAPI() {
                 )
             ).text
 
-            // Since it returns JSON, let's look for common stream key formats (like "url" or "file" or "stream")
-            // Or if it returns a direct manifest link inside the json:
             if (apiResponse.isNotBlank()) {
-                // Simple regex extraction to pull any http/https link hiding inside the JSON response
-                val urlRegex = Regex(""""(https?://[^"]+)" """)
                 val match = Regex(""""(?:url|file|stream|link)"\s*:\s*"([^"]+)"""").find(apiResponse)
-                
                 val streamUrl = match?.groupValues?.get(1) ?: if (apiResponse.startsWith("http")) apiResponse else ""
 
                 if (streamUrl.isNotBlank()) {
@@ -120,3 +114,4 @@ class CinemaOSProvider : MainAPI() {
 
         return true
     }
+}
