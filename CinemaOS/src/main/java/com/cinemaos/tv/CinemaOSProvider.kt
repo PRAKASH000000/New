@@ -75,7 +75,38 @@ class CinemaOSProvider : MainAPI() {
     }
 
 
-    override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
+        override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
+        // 1. Extract the TMDB ID from the movie page URL
+        val tmdbId = data.substringAfterLast("/")
+        
+        // 2. Build your custom player URL with the theme parameter included
+        val playerUrl = "https://cinemaos.tech/player/$tmdbId?theme=ffffff"
+        
+        // 3. Download the player page to find the actual video file
+        val document = app.get(playerUrl).document
+        
+        // Scenario A: Your player embeds a 3rd-party iframe
+        val iframe = document.selectFirst("iframe")?.attr("src")
+        if (iframe != null) {
+            val fixedIframe = if (iframe.startsWith("//")) "https:$iframe" else iframe
+            loadExtractor(fixedIframe, subtitleCallback, callback)
+        }
+        
+        // Scenario B: Your player hosts the raw .mp4 or .m3u8 file directly
+        val rawVideo = document.selectFirst("video source, video")?.attr("src")
+        if (rawVideo != null) {
+            callback.invoke(
+                ExtractorLink(
+                    source = "CinemaOS",
+                    name = "CinemaOS",
+                    url = rawVideo,
+                    referer = playerUrl,
+                    quality = Qualities.P1080.value,
+                    isM3u8 = rawVideo.contains(".m3u8")
+                )
+            )
+        }
+        
         return true
     }
-}
+
