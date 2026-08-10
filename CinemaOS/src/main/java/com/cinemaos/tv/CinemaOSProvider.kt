@@ -65,40 +65,28 @@ class CinemaOSProvider : MainAPI() {
         }
     }
 
-    override suspend fun loadLinks(
+        override suspend fun loadLinks(
         data: String, 
         isCasting: Boolean, 
         subtitleCallback: (SubtitleFile) -> Unit, 
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        // 1. Grab the TMDB ID from the movie page URL
         val tmdbId = data.substringAfterLast("/")
-        val playerUrl = "https://cinemaos.tech/player/$tmdbId?theme=ffffff"
-        val document = app.get(playerUrl).document
         
-        val iframe = document.selectFirst("iframe")?.attr("src")
-        if (iframe != null) {
-            loadExtractor(fixUrl(iframe), subtitleCallback, callback)
-        }
+        // 2. Build a list of direct embed URLs using the sources from your UI
+        val embedUrls = listOf(
+            "https://vidsrc.me/embed/movie?tmdb=$tmdbId",
+            "https://vidsrc.to/embed/movie/$tmdbId",
+            "https://autoembed.co/movie/tmdb/$tmdbId"
+            // You can easily add more APIs here in the future!
+        )
         
-        val rawVideo = document.selectFirst("video source, video")?.attr("src")
-        if (rawVideo != null) {
-            // Determine the new ExtractorLinkType based on the file extension
-            val linkType = if (rawVideo.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-            
-            // Pass the exact 4 parameters the app expects, then configure the rest inside the builder block
-            callback.invoke(
-                newExtractorLink(
-                    source = "CinemaOS",
-                    name = "CinemaOS",
-                    url = rawVideo,
-                    type = linkType
-                ) {
-                    this.referer = playerUrl
-                    this.quality = Qualities.P1080.value
-                }
-            )
+        // 3. Send them all to Cloudstream's native extractors simultaneously
+        embedUrls.forEach { url ->
+            loadExtractor(url, subtitleCallback, callback)
         }
         
         return true
     }
-}
+
