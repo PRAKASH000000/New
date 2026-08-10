@@ -2,7 +2,6 @@ package com.cinemaos.tv
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import java.net.URLEncoder
 
 class CinemaOSProvider : MainAPI() {
     override var mainUrl = "https://cinemaos.live"
@@ -129,57 +128,86 @@ class CinemaOSProvider : MainAPI() {
         }
 
         var foundLinks = false
+        var secret = ""
+        var gt = ""
+        var imdbId = ""
+        var ry = ""
+        var encodedTitle = ""
+
+        // 1. Launch a Headless Browser to steal the tokens straight out of the site's network traffic
+        val tokenInterceptor = com.lagradost.cloudstream3.network.WebViewResolver(
+            Regex("""api/providerv4/scrape|(?i)\.mpd|\.m3u8""")
+        )
 
         try {
-            // 1. Fetch HTML to find security tokens
-            val watchHtml = app.get(watchUrl, headers = defaultHeaders).text
-            
-            // Deep extraction: Try multiple regex patterns to guarantee we catch the tokens
-            var secret = Regex("""["']?secret["']?\s*[:=]\s*["']([^"']+)["']""").find(watchHtml)?.groupValues?.get(1)
-            var gt = Regex("""["']?_gt["']?\s*[:=]\s*["']([^"']+)["']""").find(watchHtml)?.groupValues?.get(1)
-            val imdbId = Regex("""["']?imdbId["']?\s*[:=]\s*["'](tt\d+)["']""").find(watchHtml)?.groupValues?.get(1) ?: ""
-            val ry = Regex("""["']?(?:ry|year)["']?\s*[:=]\s*["'](\d{4})["']""").find(watchHtml)?.groupValues?.get(1) ?: ""
-            val rawTitle = Regex("""<title>([^<]+)</title>""").find(watchHtml)?.groupValues?.get(1)?.replace("Watch ", "") ?: ""
-            val encodedTitle = URLEncoder.encode(rawTitle.substringBeforeLast(" (").trim(), "UTF-8")
+            val response = app.get(watchUrl, interceptor = tokenInterceptor)
+            val caughtUrl = response.url
 
-            // Failsafe: If tokens aren't in the HTML, check the JS files linked in the page
-            if (secret == null || gt == null) {
-                val scriptUrls = Regex("""<script[^>]+src=["']([^"']+)["']""").findAll(watchHtml).mapNotNull { it.groupValues[1] }.toList()
-                for (scriptUrl in scriptUrls) {
-                    try {
-                        val absoluteUrl = if (scriptUrl.startsWith("http")) scriptUrl else "$mainUrl$scriptUrl"
-                        val scriptText = app.get(absoluteUrl, headers = defaultHeaders).text
-                        if (secret == null) secret = Regex("""["']?secret["']?\s*[:=]\s*["']([^"']+)["']""").find(scriptText)?.groupValues?.get(1)
-                        if (gt == null) gt = Regex("""["']?_gt["']?\s*[:=]\s*["']([^"']+)["']""").find(scriptText)?.groupValues?.get(1)
-                        if (secret != null && gt != null) break
-                    } catch (e: Exception) {}
-                }
-            }
-
-            // OpenSubtitles External Fetch
-            if (imdbId.isNotBlank()) {
-                try {
-                    val subResponse = app.get("https://cinemaos.live/api/opensubtitles?imdbId=$imdbId", headers = defaultHeaders).text
-                    val subUrls = Regex(""""(?:url|file|src)"\s*:\s*"([^"]+)"""").findAll(subResponse).map { it.groupValues[1].replace("\\/", "/") }.toList()
-                    val subLangs = Regex(""""(?:name|label|language)"\s*:\s*"([^"]+)"""").findAll(subResponse).map { it.groupValues[1] }.toList()
-                    
-                    subUrls.forEachIndexed { index, url ->
-                        val lang = if (index < subLangs.size) subLangs[index] else "English"
-                        subtitleCallback.invoke(SubtitleFile(lang, url))
+            // A. The interceptor caught the API call! Pluck the valid tokens from the URL.
+            if (caughtUrl.contains("scrape")) {
+                secret = Regex("""secret=([^&]+)""").find(caughtUrl)?.groupValues?.get(1) ?: ""
+                gt = Regex("""_gt=([^&]+)""").find(caughtUrl)?.groupValues?.get(1) ?: ""
+                imdbId = Regex("""imdbId=([^&]+)""").find(caughtUrl)?.groupValues?.get(1) ?: ""
+                ry = Regex("""ry=([^&]+)""").find(caughtUrl)?.groupValues?.get(1) ?: ""
+                encodedTitle = Regex("""t=([^&]+)""").find(caughtUrl)?.groupValues?.get(1) ?: ""
+            } 
+            // B. The interceptor bypassed the API and caught the raw video immediately (Failsafe)
+            else if (caughtUrl.contains(".mpd") || caughtUrl.contains(".m3u8")) {
+                foundLinks = true
+                val isDash = caughtUrl.contains(".mpd")
+                callback.invoke(
+                    newExtractorLink(
+                        source = "CinemaOS V1",
+                        name = "Alpha - Default Track",
+                        url = caughtUrl,
+                        type = if (isDash) ExtractorLinkType.DASH else ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = "https://cinemaos.live/"
+                        this.quality = Qualities.P1080.value
                     }
-                } catch (e: Exception) {}
+                )
             }
+        } catch (e: Exception) {
+            // Silently ignore WebView timeouts
+        }
 
-            // 2. Define the exact scraper list seen in your logs
+        // Failsafe metadata gathering in case the URL didn't have everything
+        if (imdbId.isBlank()) {
+            try {
+                val html = app.get(watchUrl, headers = defaultHeaders).text
+                imdbId = Regex("""imdbId["']?\s*[:=]\s*["'](tt\d+)["']""").find(html)?.groupValues?.get(1) ?: ""
+                if (ry.isBlank()) ry = Regex("""(?:ry|year)["']?\s*[:=]\s*["'](\d{4})["']""").find(html)?.groupValues?.get(1) ?: ""
+                if (encodedTitle.isBlank()) {
+                    val rawT = Regex("""<title>([^<]+)</title>""").find(html)?.groupValues?.get(1)?.replace("Watch ", "") ?: ""
+                    encodedTitle = java.net.URLEncoder.encode(rawT.substringBeforeLast(" (").trim(), "UTF-8")
+                }
+            } catch (e: Exception) {}
+        }
+
+        // Fetch OpenSubtitles external subtitles
+        if (imdbId.isNotBlank()) {
+            try {
+                val subResponse = app.get("https://cinemaos.live/api/opensubtitles?imdbId=$imdbId", headers = defaultHeaders).text
+                val subUrls = Regex(""""(?:url|file|src)"\s*:\s*"([^"]+)"""").findAll(subResponse).map { it.groupValues[1].replace("\\/", "/") }.toList()
+                val subLangs = Regex(""""(?:name|label|language)"\s*:\s*"([^"]+)"""").findAll(subResponse).map { it.groupValues[1] }.toList()
+                
+                subUrls.forEachIndexed { index, url ->
+                    val lang = if (index < subLangs.size) subLangs[index] else "English"
+                    subtitleCallback.invoke(SubtitleFile(lang, url))
+                }
+            } catch (e: Exception) {}
+        }
+
+        // 2. We got the secret tokens! Now let's loop through the scrapers exactly like the network logs.
+        if (secret.isNotBlank() && gt.isNotBlank()) {
             val scrapers = listOf("mb2", "v2", "v1", "k9", "f8", "vf", "b5", "s3", "z2", "s7", "fc", "vc", "h0", "q4")
 
-            // 3. Process scrapers SYNCHRONOUSLY to prevent Cloudstream from choking on parallel requests
             for (scraperId in scrapers) {
                 try {
                     val scrapeUrl = if (isTv) {
-                        "https://cinemaos.live/api/providerv4/scrape?type=tv&tmdbId=$tmdbId&imdbId=$imdbId&seasonId=$season&episodeId=$episode&t=$encodedTitle&ry=$ry&secret=${secret ?: ""}&_gt=${gt ?: ""}&scraper=$scraperId"
+                        "https://cinemaos.live/api/providerv4/scrape?type=tv&tmdbId=$tmdbId&imdbId=$imdbId&seasonId=$season&episodeId=$episode&t=$encodedTitle&ry=$ry&secret=$secret&_gt=$gt&scraper=$scraperId"
                     } else {
-                        "https://cinemaos.live/api/providerv4/scrape?type=movie&tmdbId=$tmdbId&imdbId=$imdbId&t=$encodedTitle&ry=$ry&secret=${secret ?: ""}&_gt=${gt ?: ""}&scraper=$scraperId"
+                        "https://cinemaos.live/api/providerv4/scrape?type=movie&tmdbId=$tmdbId&imdbId=$imdbId&t=$encodedTitle&ry=$ry&secret=$secret&_gt=$gt&scraper=$scraperId"
                     }
 
                     val scrapeResponse = app.get(
@@ -192,7 +220,6 @@ class CinemaOSProvider : MainAPI() {
                         )
                     ).text
 
-                    // Extremely loose Regex parsing so we don't miss links due to nested curly brackets
                     val foundUrls = Regex(""""(?:url|file|stream|link|src)"\s*:\s*"([^"]+)"""").findAll(scrapeResponse).map { it.groupValues[1].replace("\\/", "/") }.toList()
                     val foundLabels = Regex(""""(?:name|label|title|server|language)"\s*:\s*"([^"]+)"""").findAll(scrapeResponse).map { it.groupValues[1] }.toList()
 
@@ -234,20 +261,24 @@ class CinemaOSProvider : MainAPI() {
                         }
                     }
                 } catch (e: Exception) {
-                    // Fail silently for this specific scraper, move to the next one
+                    // Moving on to the next scraper if one fails
                 }
             }
-        } catch (e: Exception) {}
+        }
 
-        // Ultimate Failsafe if the CinemaOS API is completely rejecting us
+        // 3. Absolute Failsafe: Use highly reliable backup public embeds if tokens fail or servers are down
         if (!foundLinks) {
             val fallbackServers = listOf(
-                "VidSrc (Backup)" to "https://vidsrc.xyz/embed/movie?tmdb=$tmdbId",
-                "Embed.su (Backup)" to "https://embed.su/embed/movie/$tmdbId"
+                "VidSrc Pro" to "https://vidsrc.net/embed/movie?tmdb=$tmdbId",
+                "VidSrc CC" to "https://vidsrc.cc/v2/embed/movie/$tmdbId",
+                "Embed.su" to "https://embed.su/embed/movie/$tmdbId",
+                "AutoEmbed" to "https://autoembed.co/movie/tmdb/$tmdbId"
             )
+            
             fallbackServers.forEach { (fallbackName, fallbackUrl) ->
+                val fbUrl = if (isTv) fallbackUrl.replace("/movie", "/tv").replace("tmdb=$tmdbId", "tmdb=$tmdbId&season=$season&episode=$episode").replace("/$tmdbId", "/$tmdbId/$season/$episode") else fallbackUrl
                 try {
-                    loadExtractor(fallbackUrl, fallbackName, subtitleCallback, callback)
+                    loadExtractor(fbUrl, fallbackName, subtitleCallback, callback)
                 } catch (e: Exception) {}
             }
         }
