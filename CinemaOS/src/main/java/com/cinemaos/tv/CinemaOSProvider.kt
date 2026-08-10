@@ -73,7 +73,6 @@ class CinemaOSProvider : MainAPI() {
         val tmdbId = data.substringAfterLast("/")
         val watchUrl = "https://cinemaos.live/watch/movie/$tmdbId"
 
-        // Use a broad interceptor to catch any manifest file (.mpd or .m3u8) that carries multi-audio tracks
         val interceptor = com.lagradost.cloudstream3.network.WebViewResolver(
             Regex("""(?i)\.mpd|\.m3u8|manifest""")
         )
@@ -93,13 +92,16 @@ class CinemaOSProvider : MainAPI() {
                         url = caughtUrl,
                         type = linkType
                     ) {
-                        this.referer = watchUrl
+                        this.referer = "https://cinemaos.live/"
+                        this.headers = mapOf(
+                            "Origin" to "https://cinemaos.live",
+                            "Accept" to "*/*"
+                        )
                         this.quality = Qualities.P1080.value
                     }
                 )
             }
         } catch (e: Exception) {
-            // Fallback to extractors if interception fails
             val embedUrls = listOf(
                 "https://vidsrc.xyz/embed/movie?tmdb=$tmdbId",
                 "https://embed.su/embed/movie/$tmdbId"
@@ -111,6 +113,7 @@ class CinemaOSProvider : MainAPI() {
 
         return true
     }
+
 
 
 
