@@ -71,52 +71,81 @@ class CinemaOSProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val tmdbId = data.substringAfterLast("/")
-        val watchUrl = "https://cinemaos.live/watch/movie/$tmdbId"
+        
+        val doc = app.get(data, headers = defaultHeaders).document
+        val rawTitle = doc.selectFirst("meta[property=og:title]")?.attr("content")?.replace("Watch ", "") ?: "Movie"
+        val cleanTitle = rawTitle.substringBeforeLast(" (").trim().replace(" ", "+")
 
-        val interceptor = com.lagradost.cloudstream3.network.WebViewResolver(
-            Regex("""(?i)\.mpd|\.m3u8|manifest""")
+        // Define all language/dubbed tracks available on the site
+        val languages = listOf(
+            "English" to "English",
+            "Arabic" to "Arabic dub",
+            "French" to "French dub",
+            "Hindi" to "Hindi",
+            "Indonesian" to "Indonesian dub",
+            "Portuguese" to "Portuguese",
+            "Russian" to "Russian dub",
+            "Spanish" to "Spanish dub",
+            "Tagalog" to "Tagalog dub",
+            "Tamil" to "Tamil"
         )
 
-        try {
-            val response = app.get(watchUrl, interceptor = interceptor)
-            val caughtUrl = response.url
+        // 1. Load V1 Language Tracks
+        for ((langKey, langName) in languages) {
+            try {
+                val apiUrl = "https://cinemaos.live/api/cinemaosv1?tmdbId=$tmdbId&type=movie&title=$cleanTitle&lang=$langKey"
+                val response = app.get(apiUrl, headers = mapOf("Referer" to data)).text
+                
+                val match = Regex(""""(?:url|file|stream|link)"\s*:\s*"([^"]+)"""").find(response)
+                val streamUrl = match?.groupValues?.get(1) ?: if (response.startsWith("http")) response else ""
 
-            if (caughtUrl.isNotBlank() && !caughtUrl.contains("/watch/")) {
-                val isDash = caughtUrl.contains(".mpd")
-                val linkType = if (isDash) ExtractorLinkType.DASH else ExtractorLinkType.M3U8
-
-                callback.invoke(
-                    newExtractorLink(
-                        source = "CinemaOS",
-                        name = "CinemaOS Multi-Audio",
-                        url = caughtUrl,
-                        type = linkType
-                    ) {
-                        this.referer = "https://cinemaos.live/"
-                        this.headers = mapOf(
-                            "Origin" to "https://cinemaos.live",
-                            "Accept" to "*/*"
-                        )
-                        this.quality = Qualities.P1080.value
-                    }
-                )
+                if (streamUrl.isNotBlank()) {
+                    val isM3u8 = streamUrl.contains(".m3u8") || streamUrl.contains("m3s") || streamUrl.contains("dash")
+                    callback.invoke(
+                        newExtractorLink(
+                            source = "CinemaOS V1",
+                            name = langName,
+                            url = streamUrl,
+                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                        ) {
+                            this.referer = "https://cinemaos.live/"
+                            this.quality = Qualities.P1080.value
+                        }
+                    )
+                }
+            } catch (e: Exception) {
+                // Skip if unavailable
             }
-        } catch (e: Exception) {
-            val embedUrls = listOf(
-                "https://vidsrc.xyz/embed/movie?tmdb=$tmdbId",
-                "https://embed.su/embed/movie/$tmdbId"
-            )
-            embedUrls.forEach { embedUrl ->
-                loadExtractor(embedUrl, subtitleCallback, callback)
+        }
+
+        // 2. Load V2 Language Tracks
+        for ((langKey, langName) in languages) {
+            try {
+                val apiUrl = "https://cinemaos.live/api/cinemaosv2?tmdbId=$tmdbId&type=movie&title=$cleanTitle&lang=$langKey"
+                val response = app.get(apiUrl, headers = mapOf("Referer" to data)).text
+                
+                val match = Regex(""""(?:url|file|stream|link)"\s*:\s*"([^"]+)"""").find(response)
+                val streamUrl = match?.groupValues?.get(1) ?: if (response.startsWith("http")) response else ""
+
+                if (streamUrl.isNotBlank()) {
+                    val isM3u8 = streamUrl.contains(".m3u8") || streamUrl.contains("m3s") || streamUrl.contains("dash")
+                    callback.invoke(
+                        newExtractorLink(
+                            source = "CinemaOS V2",
+                            name = langName,
+                            url = streamUrl,
+                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                        ) {
+                            this.referer = "https://cinemaos.live/"
+                            this.quality = Qualities.P1080.value
+                        }
+                    )
+                }
+            } catch (e: Exception) {
+                // Skip if unavailable
             }
         }
 
         return true
     }
-
-
-
-
-
-
 }
