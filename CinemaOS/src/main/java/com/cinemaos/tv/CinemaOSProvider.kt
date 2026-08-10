@@ -64,7 +64,7 @@ class CinemaOSProvider : MainAPI() {
         }
     }
 
-        override suspend fun loadLinks(
+            override suspend fun loadLinks(
         data: String, 
         isCasting: Boolean, 
         subtitleCallback: (SubtitleFile) -> Unit, 
@@ -73,25 +73,22 @@ class CinemaOSProvider : MainAPI() {
         val tmdbId = data.substringAfterLast("/")
         val watchUrl = "https://cinemaos.live/watch/movie/$tmdbId"
 
-        // Use WebViewResolver to load the page as a real browser and catch the stream/m3u8/dash links
+        // Strictly look for .m3u8 master files or playlist endpoints, ignoring chunks (.m4s)
         val interceptor = com.lagradost.cloudstream3.network.WebViewResolver(
-            Regex("""(?i)\.(mp4|m3u8)|dash|m4s|vidsrc""")
+            Regex("""(?i)\.m3u8|playlist|master""")
         )
 
         try {
             val response = app.get(watchUrl, interceptor = interceptor)
             val caughtUrl = response.url
 
-            if (caughtUrl.isNotBlank() && !caughtUrl.contains("cinemaos.live/watch")) {
-                val isM3u8 = caughtUrl.contains(".m3u8") || caughtUrl.contains("dash") || caughtUrl.contains("m4s")
-                val linkType = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-
+            if (caughtUrl.isNotBlank() && caughtUrl.contains(".m3u8")) {
                 callback.invoke(
                     newExtractorLink(
                         source = "CinemaOS",
-                        name = "CinemaOS V2 (Private)",
+                        name = "CinemaOS V2 (Master)",
                         url = caughtUrl,
-                        type = linkType
+                        type = ExtractorLinkType.M3U8
                     ) {
                         this.referer = watchUrl
                         this.quality = Qualities.P1080.value
@@ -99,10 +96,11 @@ class CinemaOSProvider : MainAPI() {
                 )
             }
         } catch (e: Exception) {
-            // Fallback if needed
+            // Error handling
         }
 
         return true
     }
+
 
 }
