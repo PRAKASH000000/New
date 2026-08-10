@@ -64,7 +64,7 @@ class CinemaOSProvider : MainAPI() {
         }
     }
 
-    override suspend fun loadLinks(
+        override suspend fun loadLinks(
         data: String, 
         isCasting: Boolean, 
         subtitleCallback: (SubtitleFile) -> Unit, 
@@ -72,39 +72,35 @@ class CinemaOSProvider : MainAPI() {
     ): Boolean {
         val tmdbId = data.substringAfterLast("/")
         
-        val doc = app.get(data, headers = defaultHeaders).document
-        val rawTitle = doc.selectFirst("meta[property=og:title]")?.attr("content")?.replace("Watch ", "") ?: "Movie"
-        val cleanTitle = rawTitle.substringBeforeLast(" (").trim().replace(" ", "+")
+        try {
+            // Fetch the watch page to parse available servers dynamically
+            val watchUrl = "https://cinemaos.live/watch/movie/$tmdbId"
+            val doc = app.get(watchUrl, headers = defaultHeaders).document
 
-        // Define all language/dubbed tracks available on the site
-        val languages = listOf(
-            "English" to "English",
-            "Arabic" to "Arabic dub",
-            "French" to "French dub",
-            "Hindi" to "Hindi",
-            "Indonesian" to "Indonesian dub",
-            "Portuguese" to "Portuguese",
-            "Russian" to "Russian dub",
-            "Spanish" to "Spanish dub",
-            "Tagalog" to "Tagalog dub",
-            "Tamil" to "Tamil"
-        )
+            // Scrape any script configs or data elements where the site lists its active video sources/servers
+            // If the site loads servers via an initial configuration JSON, we can catch it here:
+            val scriptContent = doc.select("script").html()
+            
+            // Alternatively, query the primary endpoint which often returns a dynamic list or manifest containing available tracks
+            val apiUrl = "https://cinemaos.live/api/cinemaosv1?tmdbId=$tmdbId&type=movie"
+            val apiResponse = app.get(apiUrl, headers = mapOf("Referer" to data)).text
 
-        // 1. Load V1 Language Tracks
-        for ((langKey, langName) in languages) {
-            try {
-                val apiUrl = "https://cinemaos.live/api/cinemaosv1?tmdbId=$tmdbId&type=movie&title=$cleanTitle&lang=$langKey"
-                val response = app.get(apiUrl, headers = mapOf("Referer" to data)).text
-                
-                val match = Regex(""""(?:url|file|stream|link)"\s*:\s*"([^"]+)"""").find(response)
-                val streamUrl = match?.groupValues?.get(1) ?: if (response.startsWith("http")) response else ""
+            // Extract all stream links or server objects dynamically using a loose multi-match regex
+            val streamRegex = Regex(""""(?:name|title|label)"\s*:\s*"([^"]+)".*?"(?:url|file|stream|link)"\s*:\s*"([^"]+)"""")
+            val matches = streamRegex.findAll(apiResponse)
+
+            var foundAny = false
+            for (match in matches) {
+                foundAny = true
+                val serverName = match.groupValues[1]
+                val streamUrl = match.groupValues[2].replace("\\/", "/")
 
                 if (streamUrl.isNotBlank()) {
-                    val isM3u8 = streamUrl.contains(".m3u8") || streamUrl.contains("m3s") || streamUrl.contains("dash")
+                    val isM3u8 = streamUrl.contains(".m3u8") || streamUrl.contains("dash")
                     callback.invoke(
                         newExtractorLink(
-                            source = "CinemaOS V1",
-                            name = langName,
+                            source = "CinemaOS",
+                            name = serverName,
                             url = streamUrl,
                             type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                         ) {
@@ -113,39 +109,39 @@ class CinemaOSProvider : MainAPI() {
                         }
                     )
                 }
-            } catch (e: Exception) {
-                // Skip if unavailable
             }
-        }
 
-        // 2. Load V2 Language Tracks
-        for ((langKey, langName) in languages) {
-            try {
-                val apiUrl = "https://cinemaos.live/api/cinemaosv2?tmdbId=$tmdbId&type=movie&title=$cleanTitle&lang=$langKey"
-                val response = app.get(apiUrl, headers = mapOf("Referer" to data)).text
-                
-                val match = Regex(""""(?:url|file|stream|link)"\s*:\s*"([^"]+)"""").find(response)
-                val streamUrl = match?.groupValues?.get(1) ?: if (response.startsWith("http")) response else ""
-
-                if (streamUrl.isNotBlank()) {
-                    val isM3u8 = streamUrl.contains(".m3u8") || streamUrl.contains("m3s") || streamUrl.contains("dash")
+            // Fallback if the JSON structure uses a different key layout
+            if (!foundAny) {
+                val fallbackMatch = Regex(""""(?:url|file|stream|link)"\s*:\s*"([^"]+)"""").find(apiResponse)
+                val fallbackUrl = fallbackMatch?.groupValues?.get(1)?.replace("\\/", "/") ?: ""
+                if (fallbackUrl.isNotBlank()) {
                     callback.invoke(
                         newExtractorLink(
-                            source = "CinemaOS V2",
-                            name = langName,
-                            url = streamUrl,
-                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                            source = "CinemaOS",
+                            name = "Default Server",
+                            url = fallbackUrl,
+                            type = if (fallbackUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                         ) {
                             this.referer = "https://cinemaos.live/"
                             this.quality = Qualities.P1080.value
                         }
                     )
                 }
-            } catch (e: Exception) {
-                // Skip if unavailable
+            }
+
+        } catch (e: Exception) {
+            // Fallback to general embed extractors if dynamic parsing fails
+            val embedUrls = listOf(
+                "https://vidsrc.xyz/embed/movie?tmdb=$tmdbId",
+                "https://embed.su/embed/movie/$tmdbId"
+            )
+            embedUrls.forEach { embedUrl ->
+                loadExtractor(embedUrl, subtitleCallback, callback)
             }
         }
 
         return true
     }
+
 }
