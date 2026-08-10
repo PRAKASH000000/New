@@ -64,7 +64,7 @@ class CinemaOSProvider : MainAPI() {
         }
     }
 
-        override suspend fun loadLinks(
+    override suspend fun loadLinks(
         data: String, 
         isCasting: Boolean, 
         subtitleCallback: (SubtitleFile) -> Unit, 
@@ -73,36 +73,49 @@ class CinemaOSProvider : MainAPI() {
         val tmdbId = data.substringAfterLast("/")
         
         try {
-            // Fetch the watch page to parse available servers dynamically
-            val watchUrl = "https://cinemaos.live/watch/movie/$tmdbId"
-            val doc = app.get(watchUrl, headers = defaultHeaders).document
-
-            // Scrape any script configs or data elements where the site lists its active video sources/servers
-            // If the site loads servers via an initial configuration JSON, we can catch it here:
-            val scriptContent = doc.select("script").html()
-            
-            // Alternatively, query the primary endpoint which often returns a dynamic list or manifest containing available tracks
+            // Request the backend API for the specific movie ID dynamically
             val apiUrl = "https://cinemaos.live/api/cinemaosv1?tmdbId=$tmdbId&type=movie"
             val apiResponse = app.get(apiUrl, headers = mapOf("Referer" to data)).text
 
-            // Extract all stream links or server objects dynamically using a loose multi-match regex
-            val streamRegex = Regex(""""(?:name|title|label)"\s*:\s*"([^"]+)".*?"(?:url|file|stream|link)"\s*:\s*"([^"]+)"""")
-            val matches = streamRegex.findAll(apiResponse)
+            // Extract all available stream links and labels dynamically
+            val urlRegex = Regex(""""url"\s*:\s*"([^"]+)"""")
+            val labelRegex = Regex(""""(?:name|title|label|server)"\s*:\s*"([^"]+)"""")
+            
+            val urls = urlRegex.findAll(apiResponse).map { it.groupValues[1].replace("\\/", "/") }.toList()
+            val labels = labelRegex.findAll(apiResponse).map { it.groupValues[1] }.toList()
 
-            var foundAny = false
-            for (match in matches) {
-                foundAny = true
-                val serverName = match.groupValues[1]
-                val streamUrl = match.groupValues[2].replace("\\/", "/")
+            if (urls.isNotEmpty()) {
+                for (i in urls.indices) {
+                    val streamUrl = urls[i]
+                    val serverName = if (i < labels.size) labels[i] else "Server ${i + 1}"
 
-                if (streamUrl.isNotBlank()) {
-                    val isM3u8 = streamUrl.contains(".m3u8") || streamUrl.contains("dash")
+                    if (streamUrl.isNotBlank()) {
+                        val isM3u8 = streamUrl.contains(".m3u8") || streamUrl.contains("dash")
+                        callback.invoke(
+                            newExtractorLink(
+                                source = "CinemaOS",
+                                name = serverName,
+                                url = streamUrl,
+                                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                            ) {
+                                this.referer = "https://cinemaos.live/"
+                                this.quality = Qualities.P1080.value
+                            }
+                        )
+                    }
+                }
+            } else {
+                // Fallback if JSON layout differs
+                val singleMatch = Regex(""""(?:url|file|stream|link)"\s*:\s*"([^"]+)"""").find(apiResponse)
+                val singleUrl = singleMatch?.groupValues?.get(1)?.replace("\\/", "/") ?: ""
+                
+                if (singleUrl.isNotBlank()) {
                     callback.invoke(
                         newExtractorLink(
                             source = "CinemaOS",
-                            name = serverName,
-                            url = streamUrl,
-                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                            name = "Primary Server",
+                            url = singleUrl,
+                            type = if (singleUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                         ) {
                             this.referer = "https://cinemaos.live/"
                             this.quality = Qualities.P1080.value
@@ -110,28 +123,8 @@ class CinemaOSProvider : MainAPI() {
                     )
                 }
             }
-
-            // Fallback if the JSON structure uses a different key layout
-            if (!foundAny) {
-                val fallbackMatch = Regex(""""(?:url|file|stream|link)"\s*:\s*"([^"]+)"""").find(apiResponse)
-                val fallbackUrl = fallbackMatch?.groupValues?.get(1)?.replace("\\/", "/") ?: ""
-                if (fallbackUrl.isNotBlank()) {
-                    callback.invoke(
-                        newExtractorLink(
-                            source = "CinemaOS",
-                            name = "Default Server",
-                            url = fallbackUrl,
-                            type = if (fallbackUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                        ) {
-                            this.referer = "https://cinemaos.live/"
-                            this.quality = Qualities.P1080.value
-                        }
-                    )
-                }
-            }
-
         } catch (e: Exception) {
-            // Fallback to general embed extractors if dynamic parsing fails
+            // Secondary fallback to universal community embed extractors if the site API fails
             val embedUrls = listOf(
                 "https://vidsrc.xyz/embed/movie?tmdb=$tmdbId",
                 "https://embed.su/embed/movie/$tmdbId"
@@ -143,5 +136,4 @@ class CinemaOSProvider : MainAPI() {
 
         return true
     }
-
 }
