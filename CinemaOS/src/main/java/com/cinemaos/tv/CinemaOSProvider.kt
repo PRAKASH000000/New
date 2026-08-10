@@ -71,66 +71,49 @@ class CinemaOSProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val tmdbId = data.substringAfterLast("/")
-        
+        val watchUrl = "https://cinemaos.live/watch/movie/$tmdbId"
+
+        // Intercept native stream manifests through the browser environment
+        val interceptor = com.lagradost.cloudstream3.network.WebViewResolver(
+            Regex("""(?i)\.mpd|\.m3u8|manifest|playlist""")
+        )
+
         try {
-            // Request the backend API for the specific movie ID dynamically
-            val apiUrl = "https://cinemaos.live/api/cinemaosv1?tmdbId=$tmdbId&type=movie"
-            val apiResponse = app.get(apiUrl, headers = mapOf("Referer" to data)).text
+            val response = app.get(watchUrl, interceptor = interceptor)
+            val caughtUrl = response.url
 
-            // Extract all available stream links and labels dynamically
-            val urlRegex = Regex(""""url"\s*:\s*"([^"]+)"""")
-            val labelRegex = Regex(""""(?:name|title|label|server)"\s*:\s*"([^"]+)"""")
-            
-            val urls = urlRegex.findAll(apiResponse).map { it.groupValues[1].replace("\\/", "/") }.toList()
-            val labels = labelRegex.findAll(apiResponse).map { it.groupValues[1] }.toList()
+            if (caughtUrl.isNotBlank() && !caughtUrl.contains("/watch/")) {
+                val isDash = caughtUrl.contains(".mpd")
+                val linkType = if (isDash) ExtractorLinkType.DASH else ExtractorLinkType.M3U8
 
-            if (urls.isNotEmpty()) {
-                for (i in urls.indices) {
-                    val streamUrl = urls[i]
-                    val serverName = if (i < labels.size) labels[i] else "Server ${i + 1}"
-
-                    if (streamUrl.isNotBlank()) {
-                        val isM3u8 = streamUrl.contains(".m3u8") || streamUrl.contains("dash")
-                        callback.invoke(
-                            newExtractorLink(
-                                source = "CinemaOS",
-                                name = serverName,
-                                url = streamUrl,
-                                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                            ) {
-                                this.referer = "https://cinemaos.live/"
-                                this.quality = Qualities.P1080.value
-                            }
-                        )
+                callback.invoke(
+                    newExtractorLink(
+                        source = "CinemaOS",
+                        name = "CinemaOS Stream",
+                        url = caughtUrl,
+                        type = linkType
+                    ) {
+                        this.referer = "https://cinemaos.live/"
+                        this.quality = Qualities.P1080.value
                     }
-                }
-            } else {
-                // Fallback if JSON layout differs
-                val singleMatch = Regex(""""(?:url|file|stream|link)"\s*:\s*"([^"]+)"""").find(apiResponse)
-                val singleUrl = singleMatch?.groupValues?.get(1)?.replace("\\/", "/") ?: ""
-                
-                if (singleUrl.isNotBlank()) {
-                    callback.invoke(
-                        newExtractorLink(
-                            source = "CinemaOS",
-                            name = "Primary Server",
-                            url = singleUrl,
-                            type = if (singleUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                        ) {
-                            this.referer = "https://cinemaos.live/"
-                            this.quality = Qualities.P1080.value
-                        }
-                    )
-                }
+                )
             }
         } catch (e: Exception) {
-            // Secondary fallback to universal community embed extractors if the site API fails
-            val embedUrls = listOf(
-                "https://vidsrc.xyz/embed/movie?tmdb=$tmdbId",
-                "https://embed.su/embed/movie/$tmdbId"
-            )
-            embedUrls.forEach { embedUrl ->
+            // Ignore interception errors and move to fallback
+        }
+
+        // Always provide reliable fallback embed resolvers to guarantee playback
+        val embedUrls = listOf(
+            "https://vidsrc.xyz/embed/movie?tmdb=$tmdbId",
+            "https://embed.su/embed/movie/$tmdbId",
+            "https://autoembed.co/movie/tmdb/$tmdbId"
+        )
+
+        for (embedUrl in embedUrls) {
+            try {
                 loadExtractor(embedUrl, subtitleCallback, callback)
+            } catch (e: Exception) {
+                // Continue to next extractor
             }
         }
 
