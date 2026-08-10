@@ -5,7 +5,9 @@ extra["extVersionCode"] = 1
 apply(from = "$rootDir/build.gradle.kts")
 
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
-    kotlinOptions {
-        freeCompilerArgs += listOf("-Xskip-metadata-version-check")
+    kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8)
     }
 }
+
