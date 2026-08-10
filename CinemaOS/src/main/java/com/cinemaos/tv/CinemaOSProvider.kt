@@ -80,7 +80,7 @@ class CinemaOSProvider : MainAPI() {
         if (isTv) {
             val episodes = mutableListOf<Episode>()
             
-            // Example basic extraction of episodes if the site loads them in the DOM
+            // Extract episodes from the UI layout dynamically
             document.select("a[href*=/watch/tv/]").forEach { epElement ->
                 val epUrl = fixUrlNull(epElement.attr("href")) ?: return@forEach
                 val seasonNum = Regex("""season=(\d+)""").find(epUrl)?.groupValues?.get(1)?.toIntOrNull()
@@ -117,56 +117,111 @@ class CinemaOSProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit, 
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // Construct the direct watch URL to feed into the hidden WebView
         val isTv = data.contains("/tv/")
-        val watchUrl = if (isTv) {
-            val tmdbId = data.substringAfter("/tv/").substringBefore("?")
-            val season = Regex("""season=(\d+)""").find(data)?.groupValues?.get(1) ?: "1"
-            val episode = Regex("""episode=(\d+)""").find(data)?.groupValues?.get(1) ?: "1"
-            "https://cinemaos.live/watch/tv/$tmdbId?season=$season&episode=$episode"
-        } else {
-            val tmdbId = data.substringAfterLast("/")
-            "https://cinemaos.live/watch/movie/$tmdbId"
-        }
+        val tmdbId = if (isTv) data.substringAfter("/tv/").substringBefore("?") else data.substringAfterLast("/")
+        val season = if (isTv) Regex("""season=(\d+)""").find(data)?.groupValues?.get(1) ?: "1" else null
+        val episode = if (isTv) Regex("""episode=(\d+)""").find(data)?.groupValues?.get(1) ?: "1" else null
+        
+        val doc = app.get(data, headers = defaultHeaders).document
+        val rawTitle = doc.selectFirst("meta[property=og:title]")?.attr("content")?.replace("Watch ", "") ?: ""
+        val cleanTitle = rawTitle.substringBeforeLast(" (").trim().replace(" ", "+")
 
-        // We use the WebView interceptor to catch the secure AWS DASH (.mpd) streams and VTT subtitles shown in your logs
-        val interceptor = com.lagradost.cloudstream3.network.WebViewResolver(
-            Regex("""(?i)\.mpd|\.m3u8|manifest|\.vtt""")
+        var foundMultiAudio = false
+
+        // 1. Attempt to fetch all V1 Multi-Language Tracks via direct API
+        val languages = listOf(
+            "English" to "Alpha - English",
+            "Arabic" to "Beta - Arabic dub",
+            "French" to "Gamma - French dub",
+            "Hindi" to "Delta - Hindi",
+            "Indonesian" to "Epsilon - Indonesian dub",
+            "Portuguese" to "Zeta - Portuguese",
+            "Russian" to "Eta - Russian dub",
+            "Spanish" to "Theta - Spanish dub",
+            "Tagalog" to "Track9 - Tagalog dub",
+            "Tamil" to "Track10 - Tamil"
         )
 
-        try {
-            // This loads the page invisibly, letting the site's JS generate the "secret" and "_gt" tokens natively
-            val response = app.get(watchUrl, interceptor = interceptor)
-            val caughtUrl = response.url
+        for ((langKey, langName) in languages) {
+            try {
+                val apiUrl = if (isTv) {
+                    "https://cinemaos.live/api/cinemaosv1?tmdbId=$tmdbId&type=tv&season=$season&episode=$episode&lang=$langKey"
+                } else {
+                    "https://cinemaos.live/api/cinemaosv1?tmdbId=$tmdbId&type=movie&title=$cleanTitle&lang=$langKey"
+                }
 
-            if (caughtUrl.isNotBlank() && !caughtUrl.contains("/watch/")) {
-                
-                // If it caught a subtitle file, pass it to the subtitle callback
-                if (caughtUrl.contains(".vtt")) {
-                    subtitleCallback.invoke(
-                        SubtitleFile("English", caughtUrl)
+                val apiResponse = app.get(
+                    apiUrl, 
+                    headers = mapOf(
+                        "User-Agent" to "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6 Mobile/15E148 Safari/604.1",
+                        "Referer" to data,
+                        "Accept" to "application/json, text/plain, */*",
+                        "X-Requested-With" to "XMLHttpRequest"
                     )
-                } 
-                // If it caught the media stream (.mpd / .m3u8), pass it to the video callback
-                else {
-                    val isDash = caughtUrl.contains(".mpd")
-                    val linkType = if (isDash) ExtractorLinkType.DASH else ExtractorLinkType.M3U8
+                ).text
 
+                val match = Regex(""""(?:url|file|stream|link)"\s*:\s*"([^"]+)"""").find(apiResponse)
+                val streamUrl = match?.groupValues?.get(1)?.replace("\\/", "/") ?: if (apiResponse.startsWith("http")) apiResponse else ""
+
+                if (streamUrl.isNotBlank() && !streamUrl.contains("error")) {
+                    foundMultiAudio = true
+                    val isM3u8 = streamUrl.contains(".m3u8") || streamUrl.contains("dash") || streamUrl.contains("m4s")
+                    
                     callback.invoke(
                         newExtractorLink(
                             source = "CinemaOS V1",
-                            name = "CinemaOS Stream",
-                            url = caughtUrl,
-                            type = linkType
+                            name = langName,
+                            url = streamUrl,
+                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                         ) {
                             this.referer = "https://cinemaos.live/"
                             this.quality = Qualities.P1080.value
                         }
                     )
                 }
+            } catch (e: Exception) {
+                // Ignore API skips
             }
-        } catch (e: Exception) {
-            // Silently handle timeouts or blocks
+        }
+
+        // 2. Fallback Mechanism: If the direct API is blocked and no languages are found, use WebView to grab the default English stream and subtitles.
+        if (!foundMultiAudio) {
+            val watchUrl = if (isTv) {
+                "https://cinemaos.live/watch/tv/$tmdbId?season=$season&episode=$episode"
+            } else {
+                "https://cinemaos.live/watch/movie/$tmdbId"
+            }
+
+            val interceptor = com.lagradost.cloudstream3.network.WebViewResolver(
+                Regex("""(?i)\.mpd|\.m3u8|manifest|\.vtt""")
+            )
+
+            try {
+                val response = app.get(watchUrl, interceptor = interceptor)
+                val caughtUrl = response.url
+
+                if (caughtUrl.isNotBlank() && !caughtUrl.contains("/watch/")) {
+                    if (caughtUrl.contains(".vtt")) {
+                        subtitleCallback.invoke(SubtitleFile("English", caughtUrl))
+                    } else {
+                        val isDash = caughtUrl.contains(".mpd")
+                        
+                        callback.invoke(
+                            newExtractorLink(
+                                source = "CinemaOS V1",
+                                name = "Alpha - English (Default)",
+                                url = caughtUrl,
+                                type = if (isDash) ExtractorLinkType.DASH else ExtractorLinkType.M3U8
+                            ) {
+                                this.referer = "https://cinemaos.live/"
+                                this.quality = Qualities.P1080.value
+                            }
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                // Silently handle WebView timeouts
+            }
         }
 
         return true
