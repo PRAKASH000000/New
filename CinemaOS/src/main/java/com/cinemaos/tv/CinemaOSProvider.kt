@@ -34,9 +34,7 @@ class CinemaOSProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        // Adjust this endpoint based on CinemaOS's actual search route
         val searchUrl = "$mainUrl/search?q=$query"
-        
         val document = app.get(searchUrl, headers = defaultHeaders).document
 
         return document.select("a.group.block").mapNotNull { element ->
@@ -79,20 +77,20 @@ class CinemaOSProvider : MainAPI() {
         
         val iframe = document.selectFirst("iframe")?.attr("src")
         if (iframe != null) {
-            // fixUrl automatically handles paths starting with "//"
             loadExtractor(fixUrl(iframe), subtitleCallback, callback)
         }
         
         val rawVideo = document.selectFirst("video source, video")?.attr("src")
         if (rawVideo != null) {
+            // Using newExtractorLink positionally to avoid parameter naming mismatches
             callback.invoke(
-                ExtractorLink(
-                    source = "CinemaOS",
-                    name = "CinemaOS",
-                    url = rawVideo,
-                    referer = playerUrl,
-                    quality = Qualities.P1080.value,
-                    isM3u8 = rawVideo.contains(".m3u8")
+                newExtractorLink(
+                    "CinemaOS",
+                    "CinemaOS",
+                    rawVideo,
+                    playerUrl,
+                    Qualities.P1080.value,
+                    rawVideo.contains(".m3u8")
                 )
             )
         }
