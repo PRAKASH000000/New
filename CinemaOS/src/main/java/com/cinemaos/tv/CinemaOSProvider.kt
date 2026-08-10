@@ -64,31 +64,54 @@ class CinemaOSProvider : MainAPI() {
         }
     }
 
-            override suspend fun loadLinks(
+    override suspend fun loadLinks(
         data: String, 
         isCasting: Boolean, 
         subtitleCallback: (SubtitleFile) -> Unit, 
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val tmdbId = data.substringAfterLast("/")
-        
-        // Use reliable community embed extractors as fallback providers for the TMDB ID
-        val embedUrls = listOf(
-            "https://vidsrc.xyz/embed/movie?tmdb=$tmdbId",
-            "https://embed.su/embed/movie/$tmdbId",
-            "https://autoembed.co/movie/tmdb/$tmdbId"
+        val watchUrl = "https://cinemaos.live/watch/movie/$tmdbId"
+
+        // Use a broad interceptor to catch any manifest file (.mpd or .m3u8) that carries multi-audio tracks
+        val interceptor = com.lagradost.cloudstream3.network.WebViewResolver(
+            Regex("""(?i)\.mpd|\.m3u8|manifest""")
         )
 
-        for (embedUrl in embedUrls) {
-            try {
+        try {
+            val response = app.get(watchUrl, interceptor = interceptor)
+            val caughtUrl = response.url
+
+            if (caughtUrl.isNotBlank() && !caughtUrl.contains("/watch/")) {
+                val isDash = caughtUrl.contains(".mpd")
+                val linkType = if (isDash) ExtractorLinkType.DASH else ExtractorLinkType.M3U8
+
+                callback.invoke(
+                    newExtractorLink(
+                        source = "CinemaOS",
+                        name = "CinemaOS Multi-Audio",
+                        url = caughtUrl,
+                        type = linkType
+                    ) {
+                        this.referer = watchUrl
+                        this.quality = Qualities.P1080.value
+                    }
+                )
+            }
+        } catch (e: Exception) {
+            // Fallback to extractors if interception fails
+            val embedUrls = listOf(
+                "https://vidsrc.xyz/embed/movie?tmdb=$tmdbId",
+                "https://embed.su/embed/movie/$tmdbId"
+            )
+            embedUrls.forEach { embedUrl ->
                 loadExtractor(embedUrl, subtitleCallback, callback)
-            } catch (e: Exception) {
-                // Continue to next extractor if one fails
             }
         }
 
         return true
     }
+
 
 
 
