@@ -2,7 +2,6 @@ package com.cinemaos.tv
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import java.net.URLEncoder
 
 class CinemaOSProvider : MainAPI() {
     override var mainUrl = "https://cinemaos.live"
@@ -81,6 +80,7 @@ class CinemaOSProvider : MainAPI() {
         if (isTv) {
             val episodes = mutableListOf<Episode>()
             
+            // Extract episodes dynamically from the DOM layout
             document.select("a[href*=/watch/tv/]").forEach { epElement ->
                 val epUrl = fixUrlNull(epElement.attr("href")) ?: return@forEach
                 val seasonNum = Regex("""season=(\d+)""").find(epUrl)?.groupValues?.get(1)?.toIntOrNull()
@@ -122,10 +122,6 @@ class CinemaOSProvider : MainAPI() {
         val season = if (isTv) Regex("""season=(\d+)""").find(data)?.groupValues?.get(1) ?: "1" else null
         val episode = if (isTv) Regex("""episode=(\d+)""").find(data)?.groupValues?.get(1) ?: "1" else null
         
-        val doc = app.get(data, headers = defaultHeaders).document
-        val rawTitle = doc.selectFirst("meta[property=og:title]")?.attr("content")?.replace("Watch ", "") ?: ""
-        val encodedTitle = URLEncoder.encode(rawTitle.substringBeforeLast(" (").trim(), "UTF-8")
-
         val watchUrl = if (isTv) {
             "https://cinemaos.live/watch/tv/$tmdbId?season=$season&episode=$episode"
         } else {
@@ -133,104 +129,106 @@ class CinemaOSProvider : MainAPI() {
         }
 
         var foundLinks = false
+        var scrapeApiUrl = ""
+
+        // 1. Intercept the Scrape API call to get the dynamic Javascript tokens (secret & _gt)
+        val scrapeInterceptor = com.lagradost.cloudstream3.network.WebViewResolver(
+            Regex("""api/providerv4/scrape""")
+        )
 
         try {
-            // 1. Fetch the HTML to dynamically grab the secret tokens required for the scrape API
-            val watchHtml = app.get(watchUrl, headers = defaultHeaders).text
-            
-            val secret = Regex("""["']?secret["']?\s*[:=]\s*["']([^"']+)["']""").find(watchHtml)?.groupValues?.get(1) ?: ""
-            val gt = Regex("""["']?_gt["']?\s*[:=]\s*["']([^"']+)["']""").find(watchHtml)?.groupValues?.get(1) ?: ""
-            val imdbId = Regex("""["']?imdbId["']?\s*[:=]\s*["'](tt\d+)["']""").find(watchHtml)?.groupValues?.get(1) ?: ""
-            val ry = Regex("""["']?(?:ry|year)["']?\s*[:=]\s*["'](\d{4})["']""").find(watchHtml)?.groupValues?.get(1) ?: ""
-
-            // 2. Build the API URL exactly as requested by the site
-            val scrapeUrl = if (isTv) {
-                "https://cinemaos.live/api/providerv4/scrape?type=tv&tmdbId=$tmdbId&imdbId=$imdbId&seasonId=$season&episodeId=$episode&t=$encodedTitle&ry=$ry&secret=$secret&_gt=$gt&scraper=mb2"
-            } else {
-                "https://cinemaos.live/api/providerv4/scrape?type=movie&tmdbId=$tmdbId&imdbId=$imdbId&t=$encodedTitle&ry=$ry&secret=$secret&_gt=$gt&scraper=v2"
-            }
-
-            // 3. Query the scrape API
-            val scrapeResponse = app.get(
-                scrapeUrl,
-                headers = mapOf(
-                    "User-Agent" to "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6 Mobile/15E148 Safari/604.1",
-                    "Referer" to watchUrl,
-                    "Accept" to "application/json, text/plain, */*",
-                    "X-Requested-With" to "XMLHttpRequest"
-                )
-            ).text
-
-            // 4. Extract subtitle files from the JSON response
-            val subs = Regex("""\{[^{}]*?(?:\.vtt|\.srt)[^{}]*?\}""").findAll(scrapeResponse)
-            subs.forEach { match ->
-                val block = match.value
-                val subUrl = Regex(""""(?:url|file|src)"\s*:\s*"([^"]+)"""").find(block)?.groupValues?.get(1)?.replace("\\/", "/") ?: return@forEach
-                val subLang = Regex(""""(?:name|label|language)"\s*:\s*"([^"]+)"""").find(block)?.groupValues?.get(1) ?: "English"
-                if (subUrl.isNotBlank()) {
-                    subtitleCallback.invoke(SubtitleFile(subLang, subUrl))
-                }
-            }
-
-            // 5. Broadly extract ALL multi-audio/server streams directly from the JSON (Internal & Public)
-            val streamBlocks = Regex("""\{[^{}]*?"(?:url|file|stream|link)"\s*:\s*"[^"]+"[^{}]*?\}""").findAll(scrapeResponse)
-            
-            streamBlocks.forEachIndexed { index, match ->
-                val block = match.value
-                val streamUrl = Regex(""""(?:url|file|stream|link)"\s*:\s*"([^"]+)"""").find(block)?.groupValues?.get(1)?.replace("\\/", "/") ?: return@forEachIndexed
-                
-                // Exclude subtitles from this loop
-                if (streamUrl.contains(".vtt") || streamUrl.contains(".srt")) return@forEachIndexed
-                
-                val serverName = Regex(""""(?:name|title|label|server|language)"\s*:\s*"([^"]+)"""").find(block)?.groupValues?.get(1) ?: "Server ${index + 1}"
-                
-                if (streamUrl.isNotBlank() && !streamUrl.contains("error")) {
-                    foundLinks = true
-                    
-                    // If it's a public server embedded link (like vidsrc or an iframe), use loadExtractor
-                    if (streamUrl.contains("http") && !streamUrl.contains(".mpd") && !streamUrl.contains(".m3u8") && !streamUrl.contains(".mp4")) {
-                        try {
-                            loadExtractor(streamUrl, subtitleCallback, callback)
-                        } catch (e: Exception) {
-                            // ignore unsupported public server extractors
-                        }
-                    } else {
-                        // If it's a direct video file (internal DASH/HLS or public .mp4)
-                        val isDash = streamUrl.contains(".mpd")
-                        val isM3u8 = streamUrl.contains(".m3u8") || streamUrl.contains("m4s")
-
-                        val linkType = when {
-                            isDash -> ExtractorLinkType.DASH
-                            isM3u8 -> ExtractorLinkType.M3U8
-                            else -> ExtractorLinkType.VIDEO
-                        }
-
-                        callback.invoke(
-                            newExtractorLink(
-                                source = "CinemaOS",
-                                name = serverName,
-                                url = streamUrl,
-                                type = linkType
-                            ) {
-                                this.referer = "https://cinemaos.live/"
-                                this.quality = Qualities.P1080.value
-                            }
-                        )
-                    }
-                }
+            val response = app.get(watchUrl, interceptor = scrapeInterceptor)
+            if (response.url.contains("scrape")) {
+                scrapeApiUrl = response.url // We successfully stole the authorized URL!
             }
         } catch (e: Exception) {
-            // Ignore API faults and trigger WebView fallback
+            // Ignore interception timeouts
         }
 
-        // 6. Final Failsafe: If tokens fail to extract, fall back to WebView intercepting default playback
+        // 2. Fetch the JSON from the captured API and parse it using a resilient Window Search
+        if (scrapeApiUrl.isNotBlank()) {
+            try {
+                val scrapeResponse = app.get(
+                    scrapeApiUrl,
+                    headers = mapOf(
+                        "User-Agent" to defaultHeaders["User-Agent"]!!,
+                        "Referer" to watchUrl,
+                        "Accept" to "application/json, text/plain, */*"
+                    )
+                ).text
+
+                // Find absolutely every URL mentioned in the JSON payload
+                val urlMatches = Regex(""""(?:url|file|stream|link|src)"\s*:\s*"([^"]+)"""").findAll(scrapeResponse)
+                
+                var serverCount = 1
+
+                for (match in urlMatches) {
+                    val streamUrl = match.groupValues[1].replace("\\/", "/")
+                    if (!streamUrl.startsWith("http")) continue
+
+                    // Create a text window around the URL to find its assigned language/label, bypassing nested { } brackets
+                    val startIdx = maxOf(0, match.range.first - 250)
+                    val endIdx = minOf(scrapeResponse.length, match.range.last + 250)
+                    val window = scrapeResponse.substring(startIdx, endIdx)
+                    
+                    val labelMatch = Regex(""""(?:name|label|title|server|language)"\s*:\s*"([^"]+)"""").find(window)
+                    val serverName = labelMatch?.groupValues?.get(1) ?: "Server $serverCount"
+
+                    // Handle Subtitles
+                    if (streamUrl.contains(".vtt") || streamUrl.contains(".srt")) {
+                        subtitleCallback.invoke(SubtitleFile(serverName, streamUrl))
+                    } 
+                    // Handle Video/Media Streams
+                    else {
+                        foundLinks = true
+                        
+                        // If it is an internal AWS DASH/HLS/MP4 link
+                        if (streamUrl.contains(".mpd") || streamUrl.contains(".m3u8") || streamUrl.contains(".m4s") || streamUrl.contains(".mp4")) {
+                            val isDash = streamUrl.contains(".mpd")
+                            val isM3u8 = streamUrl.contains(".m3u8") || streamUrl.contains("m4s")
+                            
+                            val linkType = when {
+                                isDash -> ExtractorLinkType.DASH
+                                isM3u8 -> ExtractorLinkType.M3U8
+                                else -> ExtractorLinkType.VIDEO
+                            }
+                            
+                            callback.invoke(
+                                newExtractorLink(
+                                    source = "CinemaOS V1",
+                                    name = serverName,
+                                    url = streamUrl,
+                                    type = linkType
+                                ) {
+                                    this.referer = "https://cinemaos.live/"
+                                    this.quality = Qualities.P1080.value
+                                }
+                            )
+                        } 
+                        // If it is an external iframe embed (like VidSrc, Wyzie, etc.)
+                        else {
+                            try {
+                                loadExtractor(streamUrl, subtitleCallback, callback)
+                            } catch (e: Exception) {
+                                // Skip unsupported public iframe embeds
+                            }
+                        }
+                    }
+                    serverCount++
+                }
+            } catch (e: Exception) {
+                // Ignore parsing errors
+            }
+        }
+
+        // 3. Absolute Failsafe: If the JS token scraper fails, fall back to grabbing the default native track
         if (!foundLinks) {
-            val interceptor = com.lagradost.cloudstream3.network.WebViewResolver(
+            val mediaInterceptor = com.lagradost.cloudstream3.network.WebViewResolver(
                 Regex("""(?i)\.mpd|\.m3u8|manifest|\.vtt""")
             )
 
             try {
-                val response = app.get(watchUrl, interceptor = interceptor)
+                val response = app.get(watchUrl, interceptor = mediaInterceptor)
                 val caughtUrl = response.url
 
                 if (caughtUrl.isNotBlank() && !caughtUrl.contains("/watch/")) {
@@ -240,7 +238,7 @@ class CinemaOSProvider : MainAPI() {
                         val isDash = caughtUrl.contains(".mpd")
                         callback.invoke(
                             newExtractorLink(
-                                source = "CinemaOS",
+                                source = "CinemaOS V1",
                                 name = "Alpha - English (Default)",
                                 url = caughtUrl,
                                 type = if (isDash) ExtractorLinkType.DASH else ExtractorLinkType.M3U8
@@ -252,7 +250,7 @@ class CinemaOSProvider : MainAPI() {
                     }
                 }
             } catch (e: Exception) {
-                // Ignore silent timeouts
+                // Silently handle timeouts
             }
         }
 
