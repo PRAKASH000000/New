@@ -8,9 +8,16 @@ class CinemaOSProvider : MainAPI() {
     override var name = "CinemaOS"
     override val hasMainPage = true
 
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        // 1. Download the website's HTML
-        val document = app.get(mainUrl).document
+        override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        // 1. Download the website's HTML while pretending to be Google Chrome
+        val document = app.get(
+            mainUrl,
+            headers = mapOf(
+                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+            )
+        ).document
+        
         val movies = ArrayList<SearchResponse>()
 
         // 2. Search for every movie card using the CSS class we found
@@ -35,6 +42,7 @@ class CinemaOSProvider : MainAPI() {
             hasNext = false
         )
     }
+
 
     override suspend fun search(query: String): List<SearchResponse> {
         return emptyList()
