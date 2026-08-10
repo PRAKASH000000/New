@@ -165,8 +165,8 @@ class CinemaOSProvider : MainAPI() {
                 listOf("k9", "f8", "vf", "b5", "s3", "z2", "s7", "fc", "vc", "h0", "v2", "mb2", "q4")
             }
 
-            // 3. Process ALL scrapers in PARALLEL natively via Cloudstream's apmap
-            scrapers.apmap { scraperId ->
+            // 3. Process ALL scrapers in PARALLEL natively via Cloudstream's amap (non-blocking)
+            scrapers.amap { scraperId ->
                 try {
                     val scrapeUrl = if (isTv) {
                         "https://cinemaos.live/api/providerv4/scrape?type=tv&tmdbId=$tmdbId&imdbId=$imdbId&seasonId=$season&episodeId=$episode&t=$encodedTitle&ry=$ry&secret=$secret&_gt=$gt&scraper=$scraperId"
