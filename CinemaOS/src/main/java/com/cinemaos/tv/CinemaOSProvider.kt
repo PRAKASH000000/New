@@ -72,15 +72,14 @@ class CinemaOSProvider : MainAPI() {
     ): Boolean {
         val tmdbId = data.substringAfterLast("/")
         
-        // 1. Fetch the movie title dynamically from the load page to match your API requirements
         val doc = app.get(data, headers = defaultHeaders).document
         val rawTitle = doc.selectFirst("meta[property=og:title]")?.attr("content")?.replace("Watch ", "") ?: "Movie"
         val cleanTitle = rawTitle.substringBeforeLast(" (").trim().replace(" ", "+")
 
-        // 2. Call your direct CinemaOS V2 backend API endpoint
         val apiUrl = "https://cinemaos.live/api/cinemaosv2?tmdbId=$tmdbId&type=movie&title=$cleanTitle"
         
         try {
+            // We fetch the JSON response from your V2 backend
             val apiResponse = app.get(
                 apiUrl, 
                 headers = mapOf(
@@ -89,37 +88,35 @@ class CinemaOSProvider : MainAPI() {
                 )
             ).text
 
-            // 3. Extract the stream URL from the JSON response
-            // (If the response returns the raw stream URL or JSON string, we parse it)
+            // Since it returns JSON, let's look for common stream key formats (like "url" or "file" or "stream")
+            // Or if it returns a direct manifest link inside the json:
             if (apiResponse.isNotBlank()) {
-                // If the response itself is the direct link or contains a stream URL:
-                val streamUrl = if (apiResponse.startsWith("http")) apiResponse else {
-                    // Quick check if it's a JSON string containing the link
-                    // e.g. finding url field or fallback to text
-                    apiResponse.substringAfter("\"url\":\"").substringBefore("\"")
-                }.ifBlank { apiResponse }
+                // Simple regex extraction to pull any http/https link hiding inside the JSON response
+                val urlRegex = Regex(""""(https?://[^"]+)" """)
+                val match = Regex(""""(?:url|file|stream|link)"\s*:\s*"([^"]+)"""").find(apiResponse)
+                
+                val streamUrl = match?.groupValues?.get(1) ?: if (apiResponse.startsWith("http")) apiResponse else ""
 
-                val finalUrl = if (streamUrl.startsWith("http")) streamUrl else apiResponse
+                if (streamUrl.isNotBlank()) {
+                    val isM3u8 = streamUrl.contains(".m3u8") || streamUrl.contains("m3s") || streamUrl.contains("dash")
+                    val linkType = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
 
-                val isM3u8 = finalUrl.contains(".m3u8") || finalUrl.contains("m3s")
-                val linkType = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-
-                callback.invoke(
-                    newExtractorLink(
-                        source = "CinemaOS",
-                        name = "CinemaOS V2 (Private)",
-                        url = finalUrl,
-                        type = linkType
-                    ) {
-                        this.referer = "https://cinemaos.live/"
-                        this.quality = Qualities.P1080.value
-                    }
-                )
+                    callback.invoke(
+                        newExtractorLink(
+                            source = "CinemaOS",
+                            name = "CinemaOS V2 (Private)",
+                            url = streamUrl,
+                            type = linkType
+                        ) {
+                            this.referer = "https://cinemaos.live/"
+                            this.quality = Qualities.P1080.value
+                        }
+                    )
+                }
             }
         } catch (e: Exception) {
-            // Fallback if API needs custom error handling
+            // Handle error silently
         }
 
         return true
     }
-}
