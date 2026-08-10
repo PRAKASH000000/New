@@ -64,54 +64,45 @@ class CinemaOSProvider : MainAPI() {
         }
     }
 
-    override suspend fun loadLinks(
+        override suspend fun loadLinks(
         data: String, 
         isCasting: Boolean, 
         subtitleCallback: (SubtitleFile) -> Unit, 
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val tmdbId = data.substringAfterLast("/")
-        
-        val doc = app.get(data, headers = defaultHeaders).document
-        val rawTitle = doc.selectFirst("meta[property=og:title]")?.attr("content")?.replace("Watch ", "") ?: "Movie"
-        val cleanTitle = rawTitle.substringBeforeLast(" (").trim().replace(" ", "+")
+        val watchUrl = "https://cinemaos.live/watch/movie/$tmdbId"
 
-        val apiUrl = "https://cinemaos.live/api/cinemaosv2?tmdbId=$tmdbId&type=movie&title=$cleanTitle"
-        
+        // Use WebViewResolver to load the page as a real browser and catch the stream/m3u8/dash links
+        val interceptor = com.lagradost.cloudstream3.network.WebViewResolver(
+            Regex("""(?i)\.(mp4|m3u8)|dash|m4s|vidsrc""")
+        )
+
         try {
-            val apiResponse = app.get(
-                apiUrl, 
-                headers = mapOf(
-                    "User-Agent" to "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6 Mobile/15E148 Safari/604.1",
-                    "Referer" to data
+            val response = app.get(watchUrl, interceptor = interceptor)
+            val caughtUrl = response.url
+
+            if (caughtUrl.isNotBlank() && !caughtUrl.contains("cinemaos.live/watch")) {
+                val isM3u8 = caughtUrl.contains(".m3u8") || caughtUrl.contains("dash") || caughtUrl.contains("m4s")
+                val linkType = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+
+                callback.invoke(
+                    newExtractorLink(
+                        source = "CinemaOS",
+                        name = "CinemaOS V2 (Private)",
+                        url = caughtUrl,
+                        type = linkType
+                    ) {
+                        this.referer = watchUrl
+                        this.quality = Qualities.P1080.value
+                    }
                 )
-            ).text
-
-            if (apiResponse.isNotBlank()) {
-                val match = Regex(""""(?:url|file|stream|link)"\s*:\s*"([^"]+)"""").find(apiResponse)
-                val streamUrl = match?.groupValues?.get(1) ?: if (apiResponse.startsWith("http")) apiResponse else ""
-
-                if (streamUrl.isNotBlank()) {
-                    val isM3u8 = streamUrl.contains(".m3u8") || streamUrl.contains("m3s") || streamUrl.contains("dash")
-                    val linkType = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-
-                    callback.invoke(
-                        newExtractorLink(
-                            source = "CinemaOS",
-                            name = "CinemaOS V2 (Private)",
-                            url = streamUrl,
-                            type = linkType
-                        ) {
-                            this.referer = "https://cinemaos.live/"
-                            this.quality = Qualities.P1080.value
-                        }
-                    )
-                }
             }
         } catch (e: Exception) {
-            // Handle error silently
+            // Fallback if needed
         }
 
         return true
     }
+
 }
