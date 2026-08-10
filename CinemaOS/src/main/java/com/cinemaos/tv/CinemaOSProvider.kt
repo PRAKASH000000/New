@@ -82,16 +82,20 @@ class CinemaOSProvider : MainAPI() {
         
         val rawVideo = document.selectFirst("video source, video")?.attr("src")
         if (rawVideo != null) {
-            // Using newExtractorLink positionally to avoid parameter naming mismatches
+            // Determine the new ExtractorLinkType based on the file extension
+            val linkType = if (rawVideo.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+            
+            // Pass the exact 4 parameters the app expects, then configure the rest inside the builder block
             callback.invoke(
                 newExtractorLink(
-                    "CinemaOS",
-                    "CinemaOS",
-                    rawVideo,
-                    playerUrl,
-                    Qualities.P1080.value,
-                    rawVideo.contains(".m3u8")
-                )
+                    source = "CinemaOS",
+                    name = "CinemaOS",
+                    url = rawVideo,
+                    type = linkType
+                ) {
+                    this.referer = playerUrl
+                    this.quality = Qualities.P1080.value
+                }
             )
         }
         
