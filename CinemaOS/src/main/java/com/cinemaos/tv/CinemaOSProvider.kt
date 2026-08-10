@@ -64,42 +64,27 @@ class CinemaOSProvider : MainAPI() {
         }
     }
 
-        override suspend fun loadLinks(
+            override suspend fun loadLinks(
         data: String, 
         isCasting: Boolean, 
         subtitleCallback: (SubtitleFile) -> Unit, 
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val tmdbId = data.substringAfterLast("/")
-        val watchUrl = "https://cinemaos.live/watch/movie/$tmdbId"
-
-        // Target DASH manifests (.mpd), master files, or playlist configs, while avoiding chunk files (.m4s)
-        val interceptor = com.lagradost.cloudstream3.network.WebViewResolver(
-            Regex("""(?i)\.mpd|manifest|playlist""")
+        
+        // Use reliable community embed extractors as fallback providers for the TMDB ID
+        val embedUrls = listOf(
+            "https://vidsrc.xyz/embed/movie?tmdb=$tmdbId",
+            "https://embed.su/embed/movie/$tmdbId",
+            "https://autoembed.co/movie/tmdb/$tmdbId"
         )
 
-        try {
-            val response = app.get(watchUrl, interceptor = interceptor)
-            val caughtUrl = response.url
-
-            if (caughtUrl.isNotBlank() && !caughtUrl.contains("/watch/")) {
-                val isDash = caughtUrl.contains(".mpd") || caughtUrl.contains("manifest")
-                val linkType = if (isDash) ExtractorLinkType.DASH else ExtractorLinkType.M3U8
-
-                callback.invoke(
-                    newExtractorLink(
-                        source = "CinemaOS",
-                        name = "CinemaOS V2 (DASH)",
-                        url = caughtUrl,
-                        type = linkType
-                    ) {
-                        this.referer = watchUrl
-                        this.quality = Qualities.P1080.value
-                    }
-                )
+        for (embedUrl in embedUrls) {
+            try {
+                loadExtractor(embedUrl, subtitleCallback, callback)
+            } catch (e: Exception) {
+                // Continue to next extractor if one fails
             }
-        } catch (e: Exception) {
-            // Handle error silently
         }
 
         return true
