@@ -2,9 +2,6 @@ package com.cinemaos.tv
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import java.net.URLEncoder
 
 class CinemaOSProvider : MainAPI() {
@@ -168,73 +165,69 @@ class CinemaOSProvider : MainAPI() {
                 listOf("k9", "f8", "vf", "b5", "s3", "z2", "s7", "fc", "vc", "h0", "v2", "mb2", "q4")
             }
 
-            // 3. Process ALL scrapers in PARALLEL to load instantly
-            coroutineScope {
-                scrapers.map { scraperId ->
-                    async {
-                        try {
-                            val scrapeUrl = if (isTv) {
-                                "https://cinemaos.live/api/providerv4/scrape?type=tv&tmdbId=$tmdbId&imdbId=$imdbId&seasonId=$season&episodeId=$episode&t=$encodedTitle&ry=$ry&secret=$secret&_gt=$gt&scraper=$scraperId"
-                            } else {
-                                "https://cinemaos.live/api/providerv4/scrape?type=movie&tmdbId=$tmdbId&imdbId=$imdbId&t=$encodedTitle&ry=$ry&secret=$secret&_gt=$gt&scraper=$scraperId"
-                            }
+            // 3. Process ALL scrapers in PARALLEL natively via Cloudstream's apmap
+            scrapers.apmap { scraperId ->
+                try {
+                    val scrapeUrl = if (isTv) {
+                        "https://cinemaos.live/api/providerv4/scrape?type=tv&tmdbId=$tmdbId&imdbId=$imdbId&seasonId=$season&episodeId=$episode&t=$encodedTitle&ry=$ry&secret=$secret&_gt=$gt&scraper=$scraperId"
+                    } else {
+                        "https://cinemaos.live/api/providerv4/scrape?type=movie&tmdbId=$tmdbId&imdbId=$imdbId&t=$encodedTitle&ry=$ry&secret=$secret&_gt=$gt&scraper=$scraperId"
+                    }
 
-                            val scrapeResponse = app.get(
-                                scrapeUrl,
-                                headers = mapOf(
-                                    "User-Agent" to defaultHeaders["User-Agent"]!!,
-                                    "Referer" to watchUrl,
-                                    "Accept" to "application/json, text/plain, */*",
-                                    "X-Requested-With" to "XMLHttpRequest"
-                                )
-                            ).text
+                    val scrapeResponse = app.get(
+                        scrapeUrl,
+                        headers = mapOf(
+                            "User-Agent" to defaultHeaders["User-Agent"]!!,
+                            "Referer" to watchUrl,
+                            "Accept" to "application/json, text/plain, */*",
+                            "X-Requested-With" to "XMLHttpRequest"
+                        )
+                    ).text
 
-                            val serverBlocks = Regex("""\{[^{}]*?"(?:url|file|stream|link|src)"\s*:\s*"[^"]+"[^{}]*?\}""").findAll(scrapeResponse)
+                    val serverBlocks = Regex("""\{[^{}]*?"(?:url|file|stream|link|src)"\s*:\s*"[^"]+"[^{}]*?\}""").findAll(scrapeResponse)
+                    
+                    serverBlocks.forEachIndexed { index, match ->
+                        val block = match.value
+                        val serverUrl = Regex(""""(?:url|file|stream|link|src)"\s*:\s*"([^"]+)"""").find(block)?.groupValues?.get(1)?.replace("\\/", "/") ?: return@forEachIndexed
+                        val rawServerName = Regex(""""(?:name|label|title|server|language)"\s*:\s*"([^"]+)"""").find(block)?.groupValues?.get(1) ?: "Server"
+                        val serverName = "$rawServerName [$scraperId]"
+
+                        if (serverUrl.isBlank() || serverUrl.contains("error")) return@forEachIndexed
+
+                        if (serverUrl.contains(".vtt") || serverUrl.contains(".srt")) {
+                            subtitleCallback.invoke(SubtitleFile(serverName, serverUrl))
+                        } 
+                        else if (serverUrl.contains(".mpd") || serverUrl.contains(".m3u8") || serverUrl.contains(".m4s") || serverUrl.contains(".mp4")) {
+                            foundLinks = true
+                            val isDash = serverUrl.contains(".mpd")
+                            val isM3u8 = serverUrl.contains(".m3u8") || serverUrl.contains("m4s")
                             
-                            serverBlocks.forEachIndexed { index, match ->
-                                val block = match.value
-                                val serverUrl = Regex(""""(?:url|file|stream|link|src)"\s*:\s*"([^"]+)"""").find(block)?.groupValues?.get(1)?.replace("\\/", "/") ?: return@forEachIndexed
-                                val rawServerName = Regex(""""(?:name|label|title|server|language)"\s*:\s*"([^"]+)"""").find(block)?.groupValues?.get(1) ?: "Server"
-                                val serverName = "$rawServerName [$scraperId]"
-
-                                if (serverUrl.isBlank() || serverUrl.contains("error")) return@forEachIndexed
-
-                                if (serverUrl.contains(".vtt") || serverUrl.contains(".srt")) {
-                                    subtitleCallback.invoke(SubtitleFile(serverName, serverUrl))
-                                } 
-                                else if (serverUrl.contains(".mpd") || serverUrl.contains(".m3u8") || serverUrl.contains(".m4s") || serverUrl.contains(".mp4")) {
-                                    foundLinks = true
-                                    val isDash = serverUrl.contains(".mpd")
-                                    val isM3u8 = serverUrl.contains(".m3u8") || serverUrl.contains("m4s")
-                                    
-                                    callback.invoke(
-                                        newExtractorLink(
-                                            source = "CinemaOS V1",
-                                            name = serverName,
-                                            url = serverUrl,
-                                            type = when {
-                                                isDash -> ExtractorLinkType.DASH
-                                                isM3u8 -> ExtractorLinkType.M3U8
-                                                else -> ExtractorLinkType.VIDEO
-                                            }
-                                        ) {
-                                            this.referer = "https://cinemaos.live/"
-                                            this.quality = Qualities.P1080.value
-                                        }
-                                    )
-                                } 
-                                else if (serverUrl.startsWith("http")) {
-                                    foundLinks = true
-                                    try {
-                                        loadExtractor(serverUrl, serverName, subtitleCallback, callback)
-                                    } catch (e: Exception) {}
+                            callback.invoke(
+                                newExtractorLink(
+                                    source = "CinemaOS V1",
+                                    name = serverName,
+                                    url = serverUrl,
+                                    type = when {
+                                        isDash -> ExtractorLinkType.DASH
+                                        isM3u8 -> ExtractorLinkType.M3U8
+                                        else -> ExtractorLinkType.VIDEO
+                                    }
+                                ) {
+                                    this.referer = "https://cinemaos.live/"
+                                    this.quality = Qualities.P1080.value
                                 }
-                            }
-                        } catch (e: Exception) {
-                            // Move to next scraper
+                            )
+                        } 
+                        else if (serverUrl.startsWith("http")) {
+                            foundLinks = true
+                            try {
+                                loadExtractor(serverUrl, serverName, subtitleCallback, callback)
+                            } catch (e: Exception) {}
                         }
                     }
-                }.awaitAll()
+                } catch (e: Exception) {
+                    // Move to next scraper
+                }
             }
         } catch (e: Exception) {}
 
