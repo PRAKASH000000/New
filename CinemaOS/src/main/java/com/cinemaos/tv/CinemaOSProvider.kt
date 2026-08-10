@@ -48,9 +48,32 @@ class CinemaOSProvider : MainAPI() {
         return emptyList()
     }
 
-    override suspend fun load(url: String): LoadResponse? {
-        return null
+        override suspend fun load(url: String): LoadResponse? {
+        // 1. Download the movie page while disguised as Google Chrome
+        val document = app.get(
+            url,
+            headers = mapOf(
+                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+            )
+        ).document
+
+        // 2. Extract the data from the hidden meta tags
+        val rawTitle = document.selectFirst("meta[property=og:title]")?.attr("content")?.replace("Watch ", "") ?: ""
+        val title = rawTitle.substringBeforeLast(" (").trim()
+        val year = rawTitle.substringAfterLast("(").replace(")", "").toIntOrNull()
+        
+        val plot = document.selectFirst("meta[property=og:description]")?.attr("content")
+        val backgroundPoster = document.selectFirst("meta[property=og:image]")?.attr("content")
+
+        // 3. Send the packaged data to the TV screen
+        return newMovieLoadResponse(title, url, TvType.Movie, url) {
+            this.posterUrl = backgroundPoster
+            this.plot = plot
+            this.year = year
+        }
     }
+
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         return true
