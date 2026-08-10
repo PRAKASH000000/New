@@ -65,28 +65,27 @@ class CinemaOSProvider : MainAPI() {
         }
     }
 
-        override suspend fun loadLinks(
+    override suspend fun loadLinks(
         data: String, 
         isCasting: Boolean, 
         subtitleCallback: (SubtitleFile) -> Unit, 
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // 1. Grab the TMDB ID from the movie page URL
+        // Grab the TMDB ID from the movie page URL
         val tmdbId = data.substringAfterLast("/")
         
-        // 2. Build a list of direct embed URLs using the sources from your UI
+        // Build a list of direct embed URLs
         val embedUrls = listOf(
             "https://vidsrc.me/embed/movie?tmdb=$tmdbId",
             "https://vidsrc.to/embed/movie/$tmdbId",
             "https://autoembed.co/movie/tmdb/$tmdbId"
-            // You can easily add more APIs here in the future!
         )
         
-        // 3. Send them all to Cloudstream's native extractors simultaneously
-        embedUrls.forEach { url ->
-            loadExtractor(url, subtitleCallback, callback)
+        // Send them to Cloudstream's native extractors
+        embedUrls.forEach { embedUrl ->
+            loadExtractor(embedUrl, subtitleCallback, callback)
         }
         
         return true
     }
-
+} // <-- This is the final bracket that was missing!
